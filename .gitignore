@@ -1,0 +1,20 @@
+# Project build files
+/*.rbxl
+/*.rbxlx
+/*.rbxm
+/*.rbxmx
+
+# Wally packages
+/Packages
+/DevPackages
+
+# Roblox Studio lock files
+/*.rbxlx.lock
+/*.rbxl.lock
+
+# Tooling files
+.vscode/*
+.claude/*
+
+# Python
+__pycache__
