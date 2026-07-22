@@ -11,16 +11,12 @@ local types = require(script.Parent.types)
 
 local bitstream = {}
 
--- The reader sits on the decoder's hot path, so localize bit32 once here to skip
--- a global lookup on every operation.
-local bit = bit32
-
 --[[
 	Discards the first n bits from the bit buffer.
 ]]
 local function flushBits(self: types.Bitstream, n: number)
 	self.n = self.n - n
-	self.b = bit.rshift(self.b, n)
+	self.b = bit32.rshift(self.b, n)
 end
 
 --[[
@@ -37,10 +33,10 @@ end
 ]]
 local function peekBits(self: types.Bitstream, n: number): number
 	while self.n < n do
-		self.b = self.b + bit.lshift(self:nextByte(), self.n)
+		self.b = self.b + bit32.lshift(self:nextByte(), self.n)
 		self.n = self.n + 8
 	end
-	return bit.band(self.b, bit.lshift(1, n) - 1)
+	return bit32.band(self.b, bit32.lshift(1, n) - 1)
 end
 
 --[[
@@ -49,7 +45,7 @@ end
 local function getBits(self: types.Bitstream, n: number): number
 	local ret = self:peekBits(n)
 	self.n = self.n - n
-	self.b = bit.rshift(self.b, n)
+	self.b = bit32.rshift(self.b, n)
 	return ret
 end
 
@@ -59,17 +55,20 @@ end
 	symbol can take.
 ]]
 local function getSymbol(self: types.Bitstream, hufftable: types.HuffTable, n: number): number
-	local e = hufftable[self:peekBits(n)]
-	local len = bit.band(e, 15)
-	local ret = bit.rshift(e, 4)
+	local e = buffer.readu16(hufftable, self:peekBits(n) * 2)
+	if e == 0 then
+		error("invalid Huffman code")
+	end
+	local len = bit32.band(e, 15)
+	local ret = bit32.rshift(e, 4)
 	self.n = self.n - len
-	self.b = bit.rshift(self.b, len)
+	self.b = bit32.rshift(self.b, len)
 	return ret
 end
 
 --[[
-	Builds a bitstream reader over a buffer of compressed data. Accepts a string
-	for convenience and converts it to a buffer once up front.
+	Builds a bitstream reader over a buffer of compressed data, accepting a
+	string for convenience.
 ]]
 function bitstream.new(data: buffer | string): types.Bitstream
 	local buf = if type(data) == "string" then buffer.fromstring(data) else data

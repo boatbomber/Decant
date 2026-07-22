@@ -7,13 +7,14 @@ payloads, compresses each to gzip and zlib with Python's stdlib, assembles a set
 of ZIP archives that cover the shapes real archives come in, verifies every
 artifact by reading it back, and writes the whole lot out as a Luau data module.
 
-Some fixtures exercise features Decant does not support yet. Those are here on purpose.
-The tests mark them with it.failing so the suite records where the gaps are.
+Some fixtures exercise features Decant does not support. Those are here on purpose,
+giving the tests something concrete to point unsupported-method errors at.
 
 Run it from the repository root with `python scripts/generate-test-data.py`.
 """
 
 import base64
+import calendar
 import gzip
 import io
 import random
@@ -145,8 +146,8 @@ TIMESTAMP_EXTRA = b"\x55\x54\x05\x00\x01\x00\x00\x00\x00"
 
 # The archives, each a list of entries in the order they land in the central
 # directory. The shapes differ on purpose so the ZIP tests can lean on whichever
-# one exercises the behavior in question, and the unsupported ones give the
-# it.failing tests something concrete to point at.
+# one exercises the behavior in question, and the unsupported methods give the
+# error tests something concrete to point at.
 ARCHIVES = {
     # A bit of everything: deflated, stored, empty, a nested path, and an entry
     # large enough to push the inflate output buffer past its starting size.
@@ -304,8 +305,7 @@ ARCHIVES = {
             entry("ordinary.txt", raw(b"a normal neighbor"), DEFLATE),
         ],
     },
-    # A bzip2 compressed entry, method 12, which Decant feeds to its deflate
-    # decoder and cannot read.
+    # A bzip2 compressed entry, method 12, which Decant rejects by method id.
     "bzip2": {
         "entries": [
             entry("compressed.txt", rep(b"bzip2 compresses this. ", 40), BZIP2),
@@ -376,6 +376,14 @@ def _add_entries(archive, entries):
         # into a forward slash.
         info.filename = item["path"]
         info.compress_type = item["method"]
+        # ZipInfo starts with zeroed external attributes, so fill in the ones a
+        # real archiver records: a Unix mode in the high sixteen bits and the
+        # MS-DOS directory bit for folder entries, giving the metadata tests
+        # something true to life to read back.
+        if item["path"].endswith("/"):
+            info.external_attr = (0o40755 << 16) | 0x10
+        else:
+            info.external_attr = 0o644 << 16
         if item["comment"] is not None:
             info.comment = item["comment"]
         if item["extra"] is not None:
@@ -409,12 +417,13 @@ def build_zip(spec) -> bytes:
 def verify_zip(zip_bytes: bytes, spec):
     """Reads an archive back and confirms its entries survived the round trip.
 
-    Returns whether each entry ended up compressed, in central directory order,
-    so the emitted expectations describe the bytes on disk. The read goes through
-    the ZipInfo rather than the name so duplicate names each get their own body.
+    Returns one expectation record per entry, in central directory order, built
+    from what the archive actually stores rather than what was asked for, so the
+    emitted expectations describe the bytes on disk. The read goes through the
+    ZipInfo rather than the name so duplicate names each get their own body.
     """
     entries = spec["entries"]
-    packed = []
+    expectations = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
         broken = archive.testzip()
         if broken is not None:
@@ -430,8 +439,21 @@ def verify_zip(zip_bytes: bytes, spec):
                 raise ValueError(
                     f"{info.filename} read back differently than it was written"
                 )
-            packed.append(info.compress_type != STORE)
-    return packed
+            expectations.append(
+                {
+                    "packed": info.compress_type != STORE,
+                    "method": info.compress_type,
+                    "compressedSize": info.compress_size,
+                    # The DOS timestamp carries no zone, so the expectation
+                    # treats it as UTC the same way the reader does.
+                    "modified": calendar.timegm(info.date_time + (0, 0, 0)),
+                    "isDirectory": info.is_dir()
+                    or bool(info.external_attr & 0x10),
+                    "attributes": info.external_attr & 0xFFFFFFFF,
+                    "utf8": bool(info.flag_bits & 0x800),
+                }
+            )
+    return expectations
 
 
 def lua_string(data: bytes) -> str:
@@ -457,6 +479,11 @@ def lua_string(data: bytes) -> str:
 def b64(data: bytes) -> str:
     """Base64 encodes bytes into an ASCII string."""
     return base64.b64encode(data).decode("ascii")
+
+
+def lua_bool(value: bool) -> str:
+    """Renders a Python boolean as a Luau boolean literal."""
+    return "true" if value else "false"
 
 
 def emit_spec(spec) -> str:
@@ -525,18 +552,27 @@ def render_archives(lines):
             "stream": spec.get("stream"),
             "prefix": spec.get("prefix"),
         }
-        packed = verify_zip(build_zip(verify_spec), verify_spec)
+        expected = verify_zip(build_zip(verify_spec), verify_spec)
         zip_bytes = build_zip(spec)
         lines.append(f"\t\t{key} = {{")
         lines.append(f'\t\t\tzip = "{b64(zip_bytes)}",')
+        lines.append(f"\t\t\tcomment = {lua_string(spec.get('comment') or b'')},")
         lines.append("\t\t\tfiles = {")
-        for item, is_packed in zip(spec["entries"], packed):
-            path = lua_string(item["path"].encode("utf-8"))
-            body = emit_spec(item["payload"])
-            flag = "true" if is_packed else "false"
-            lines.append(
-                f"\t\t\t\t{{ path = {path}, body = {body}, packed = {flag} }},"
+        for item, meta in zip(spec["entries"], expected):
+            fields = ", ".join(
+                [
+                    f"path = {lua_string(item['path'].encode('utf-8'))}",
+                    f"body = {emit_spec(item['payload'])}",
+                    f"packed = {lua_bool(meta['packed'])}",
+                    f"method = {meta['method']}",
+                    f"compressedSize = {meta['compressedSize']}",
+                    f"modified = {meta['modified']}",
+                    f"isDirectory = {lua_bool(meta['isDirectory'])}",
+                    f"attributes = {meta['attributes']}",
+                    f"utf8 = {lua_bool(meta['utf8'])}",
+                ]
             )
+            lines.append(f"\t\t\t\t{{ {fields} }},")
         lines.append("\t\t\t},")
         lines.append("\t\t},")
     lines.append("\t},")
@@ -591,8 +627,8 @@ def render() -> str:
         "\tbenchmark script decodes. Each payload and archive body is stored either",
         "\tas a base64 blob or as a repeated unit, and the gzip, zlib, and archive",
         "\tbytes are base64. Some archives use features Decant does not support,",
-        "\twhich the tests reach for with it.failing. Regenerate with",
-        "\t`python scripts/generate-test-data.py`.",
+        "\twhich the unsupported-method tests reach for.",
+        "\tRegenerate with `python scripts/generate-test-data.py`.",
         "]]",
         "",
         "return table.freeze({",

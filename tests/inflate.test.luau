@@ -1,7 +1,7 @@
 --[[
-	Tests for inflate, the deflate core the format modules build on. Covers the
-	CRC-32 check vectors and its continuation parameter, and decoding a bare
-	deflate stream across every block type.
+	Tests for inflate, the deflate core the format modules build on. Covers
+	decoding a bare deflate stream across every block type and rejecting
+	malformed block headers.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -20,21 +20,6 @@ local inflate = require(Packages:WaitForChild("Decant"):WaitForChild("inflate"))
 local fixtures = require(TestProject:WaitForChild("fixtures"))
 
 describe("inflate", function()
-	it("Computes CRC-32 check vectors", function()
-		-- The standard check value for this input is 0xCBF43926.
-		expect(inflate.crc32(buffer.fromstring("123456789"))).toBe(0xCBF43926)
-		expect(inflate.crc32(buffer.fromstring(""))).toBe(0)
-	end)
-
-	it("Continues a CRC-32 across chunks", function()
-		-- Feeding the running checksum back in has to match hashing the whole
-		-- input in one pass, which is what lets a caller stream the data.
-		local whole = inflate.crc32(buffer.fromstring("123456789"))
-		local first = inflate.crc32(buffer.fromstring("12345"))
-		local both = inflate.crc32(buffer.fromstring("6789"), first)
-		expect(both).toBe(whole)
-	end)
-
 	it("Inflates a bare deflate stream across block types", function()
 		-- Every payload exercises the decoder a little differently. The
 		-- incompressible ones fall back on stored blocks, the text ones lean on

@@ -75,20 +75,25 @@ for key, entry in sampleData.archives do
 			path = file.path,
 			body = materialize(file.body),
 			packed = file.packed,
+			method = file.method,
+			compressedSize = file.compressedSize,
+			modified = file.modified,
+			isDirectory = file.isDirectory,
+			attributes = file.attributes,
+			utf8 = file.utf8,
 		}
 	end
 	archives[key] = {
 		bytes = b64decode(entry.zip),
+		comment = entry.comment,
 		files = files,
 	}
 end
 
 --[[
-	Returns the deflate stream behind a payload's zlib fixture, with the four byte
-	Adler-32 trailer left on the end. The zlib header is a fixed two bytes, so the
-	deflate data starts at byte three. inflate.decode peeks a couple bytes past the
-	final code, the same way it does inside a real gzip or zlib stream, so those
-	trailing bytes have to be there for it to read.
+	Returns the deflate stream behind a payload's zlib fixture by stripping the
+	fixed two byte header. The Adler-32 trailer stays on the end because
+	inflate.decode peeks a couple bytes past the final code.
 ]]
 local function deflateStream(key: string): string
 	return string.sub(zlib[key], 3)
@@ -102,18 +107,15 @@ local gzipMembers = {
 	full = materialize(sampleData.gzipMembers.full),
 }
 
--- A gzip stream whose header carries a valid CRC16 over its own bytes, paired
--- with the payload it decodes to. It is the one fixture that sets that optional
--- header field, so a test can check what a reader does with it.
+-- The one fixture whose gzip header carries the optional CRC16, paired with
+-- the payload it decodes to.
 local gzipHeaderCrc = {
 	stream = b64decode(sampleData.gzipHeaderCrc.stream),
 	expected = materialize(sampleData.gzipHeaderCrc.expected),
 }
 
--- The large streams the benchmark script decodes, each holding its gzip and zlib
--- bytes and the size those bytes decode to. They are far bigger than the test
--- payloads so a decode runs long enough to time cleanly, and they live apart
--- from payloads so the correctness suite never pays to decode them.
+-- The large streams the benchmark script decodes. They live apart from
+-- payloads so the correctness suite never pays to decode them.
 local benchmarks = {}
 for key, entry in sampleData.benchmarks do
 	benchmarks[key] = {
@@ -124,10 +126,8 @@ for key, entry in sampleData.benchmarks do
 end
 
 --[[
-	Returns the raw deflate stream behind a benchmark payload, the same two byte
-	zlib header stripped off the front the way deflateStream does for the test
-	payloads, so the benchmarks can feed the inflate core with no wrapper around
-	it.
+	Returns the raw deflate stream behind a benchmark payload, the same way
+	deflateStream does for the test payloads.
 ]]
 local function benchmarkDeflate(key: string): string
 	return string.sub(benchmarks[key].zlib, 3)

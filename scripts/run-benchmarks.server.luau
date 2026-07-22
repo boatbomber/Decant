@@ -24,6 +24,7 @@ local DecantModule = Packages:WaitForChild("Decant")
 local Decant = require(DecantModule)
 local bitstream = require(DecantModule:WaitForChild("bitstream"))
 local inflate = require(DecantModule:WaitForChild("inflate"))
+local crc32 = require(DecantModule:WaitForChild("crc32"))
 local fixtures = require(TestProject:WaitForChild("fixtures"))
 
 local RUNS = 10
@@ -122,6 +123,16 @@ for key in fixtures.payloads do
 	table.insert(deflateCorpus, buffer.fromstring(fixtures.deflateStream(key)))
 end
 
+-- The shortest stream in the corpus, which the fixed overhead benchmark
+-- decodes over and over. A decode this small spends nearly all its time on the
+-- setup every decode pays, so it prices that setup on its own.
+local tinyDeflate = deflateCorpus[1]
+for _, compressed in deflateCorpus do
+	if buffer.len(compressed) < buffer.len(tinyDeflate) then
+		tinyDeflate = compressed
+	end
+end
+
 -- The large benchmark streams in their gzip, zlib, and raw deflate forms. The
 -- prose payload leans on the literal decoding loop and the bulk payload on the
 -- match copy loop, so together they cover both halves of the inflate hot path.
@@ -166,12 +177,12 @@ end)
 
 section("CRC-32 core")
 
-bench("inflate.crc32 bulk", bulkSize, noSetup, function()
-	sink += inflate.crc32(bulkOutput)
+bench("crc32.compute bulk", bulkSize, noSetup, function()
+	sink += crc32.compute(bulkOutput)
 end)
 
-bench("inflate.crc32 prose", proseSize, noSetup, function()
-	sink += inflate.crc32(proseOutput)
+bench("crc32.compute prose", proseSize, noSetup, function()
+	sink += crc32.compute(proseOutput)
 end)
 
 section("gzip")
@@ -219,6 +230,12 @@ end)
 bench("deflate.decompress corpus (13 payloads)", nil, noSetup, function()
 	for _, compressed in deflateCorpus do
 		sink += buffer.len(Decant.deflate.decompress(compressed))
+	end
+end)
+
+bench("deflate.decompress smallest x1000 (fixed overhead)", nil, noSetup, function()
+	for _ = 1, 1000 do
+		sink += buffer.len(Decant.deflate.decompress(tinyDeflate))
 	end
 end)
 

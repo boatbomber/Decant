@@ -1,10 +1,9 @@
 --[[
 	Tests for Decant.zip, the ZIP archive reader. Covers walking the central
-	directory, extracting files by name or offset, the iterateFiles filter, and
-	the ways a lookup can miss or an archive can be malformed. The archives come
-	in a range of shapes so each behavior is exercised on the structure that shows
-	it best. Real-world features Decant does not support yet are marked it.failing
-	so the suite records the gaps and flags the moment one closes.
+	directory and its metadata fields, extracting files by name or offset, the
+	iterateFiles filter, the path safety helper, and the ways a lookup can miss
+	or an archive can be malformed. Features Decant does not support are marked
+	it.skip so the suite records the gaps.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -66,6 +65,49 @@ describe("Decant.zip", function()
 			expect(got.offset > 0).toBe(true)
 			expect(type(got.crc)).toBe("number")
 		end
+	end)
+
+	it("Reports the extended metadata fields", function()
+		-- The generator recorded what Python's zipfile actually wrote for each
+		-- entry, so every field here is checked against an independent reading of
+		-- the same archive bytes.
+		for _, key in { "mixed", "stored", "directories", "paths", "dataDescriptor", "comments" } do
+			local archive = archives[key]
+			local index = 0
+			for meta in Decant.zip.iterateFileMetadata(buffer.fromstring(archive.bytes)) do
+				index += 1
+				local expected = archive.files[index]
+				expect(meta.method).toBe(expected.method)
+				expect(meta.compressedSize).toBe(expected.compressedSize)
+				expect(meta.modified).toBe(expected.modified)
+				expect(meta.isDirectory).toBe(expected.isDirectory)
+				expect(meta.attributes).toBe(expected.attributes)
+				expect(meta.utf8).toBe(expected.utf8)
+			end
+			expect(index).toBe(#archive.files)
+		end
+	end)
+
+	it("Marks directory entries and UTF-8 flagged names", function()
+		-- A few pointed checks on top of the field sweep. The fixtures pin the
+		-- modification time to the DOS epoch, folders carry both the trailing
+		-- slash and the MS-DOS directory bit, and Python's writer raises the
+		-- UTF-8 flag only on names that need it.
+		local byPath = {}
+		for meta in Decant.zip.iterateFileMetadata(buffer.fromstring(archives.directories.bytes)) do
+			byPath[meta.path] = meta
+		end
+		expect(byPath["docs/"].isDirectory).toBe(true)
+		expect(byPath["docs/guide.txt"].isDirectory).toBe(false)
+		expect(byPath["docs/"].modified).toBe(315532800)
+
+		local flagged = {}
+		for meta in Decant.zip.iterateFileMetadata(buffer.fromstring(archives.paths.bytes)) do
+			flagged[meta.path] = meta.utf8
+		end
+		expect(flagged["café/naïve/résumé.txt"]).toBe(true)
+		expect(flagged["日本語/ファイル.txt"]).toBe(true)
+		expect(flagged["with spaces and (parens).txt"]).toBe(false)
 	end)
 
 	it("Extracts every file across archive shapes", function()
@@ -269,6 +311,71 @@ describe("Decant.zip", function()
 		end).toThrow()
 	end)
 
+	it("Rejects a central directory that claims to extend past the archive", function()
+		-- Blowing up the recorded central directory size makes the record claim
+		-- more bytes than sit in front of it, which has to fail up front with a
+		-- clear message rather than a raw out of bounds read.
+		local bytes = archives.mixed.bytes
+		local eocd = string.find(bytes, "PK\5\6", 1, true)
+		expect(eocd).toBeDefined()
+		local corrupted = buffer.fromstring(bytes)
+		buffer.writeu32(corrupted, eocd - 1 + 12, 0xFFFFFFFF)
+		expect(function()
+			Decant.zip.extractFile(corrupted, "readme.txt")
+		end).toThrow("central directory extends past the archive")
+	end)
+
+	it("Rejects an entry whose name runs past the archive", function()
+		-- A lying name length would send the walk reading far beyond the buffer,
+		-- so the bounds check turns it into a clear truncation error.
+		local bytes = archives.mixed.bytes
+		local cd = string.find(bytes, "PK\1\2", 1, true)
+		expect(cd).toBeDefined()
+		local corrupted = buffer.fromstring(bytes)
+		buffer.writeu16(corrupted, cd - 1 + 28, 0xFFFF)
+		expect(function()
+			Decant.zip.extractFile(corrupted, "readme.txt")
+		end).toThrow("truncated central directory")
+	end)
+
+	it("Rejects an entry whose data runs past the archive", function()
+		-- A compressed size larger than the file means the entry's data cannot
+		-- all be there, and the walk says so instead of reading off the end.
+		local bytes = archives.mixed.bytes
+		local cd = string.find(bytes, "PK\1\2", 1, true)
+		expect(cd).toBeDefined()
+		local corrupted = buffer.fromstring(bytes)
+		buffer.writeu32(corrupted, cd - 1 + 20, 0xFFFFFFFF)
+		expect(function()
+			Decant.zip.extractFile(corrupted, "readme.txt")
+		end).toThrow("entry data extends past the archive")
+	end)
+
+	it("Reads the archive comment", function()
+		-- The comment fixture's comment is itself a decoy end of central
+		-- directory signature, so reading it back proves both the accessor and
+		-- the scan that had to step over it.
+		expect(Decant.zip.readComment(buffer.fromstring(archives.comment.bytes))).toBe(archives.comment.comment)
+		expect(Decant.zip.readComment(buffer.fromstring(archives.mixed.bytes))).toBe("")
+	end)
+
+	it("Judges entry paths for filesystem safety", function()
+		local isPathSafe = Decant.zip.isPathSafe
+		expect(isPathSafe("docs/guide.txt")).toBe(true)
+		expect(isPathSafe("deep/a/../b.txt")).toBe(true)
+		expect(isPathSafe("./here.txt")).toBe(true)
+		expect(isPathSafe("日本語/ファイル.txt")).toBe(true)
+		expect(isPathSafe("trailing.dots...")).toBe(true)
+		expect(isPathSafe("../relative/escape.txt")).toBe(false)
+		expect(isPathSafe("a/../../b.txt")).toBe(false)
+		expect(isPathSafe("/leading/slash.txt")).toBe(false)
+		expect(isPathSafe("\\leading\\backslash.txt")).toBe(false)
+		expect(isPathSafe("..\\backslash\\path.txt")).toBe(false)
+		expect(isPathSafe("C:evil.txt")).toBe(false)
+		expect(isPathSafe("c:/evil.txt")).toBe(false)
+		expect(isPathSafe("embedded\0null.txt")).toBe(false)
+	end)
+
 	it("Verifies a stored entry's CRC", function()
 		local bytes = archives.stored.bytes
 		local target
@@ -299,43 +406,43 @@ describe("Decant.zip", function()
 	end)
 
 	it.skip("Reads a zip64 overflow entry", function()
-		-- A zip64 overflow entry parks the 0xFFFFFFFF sentinel in its 32-bit size
-		-- field because the real size, carried in a zip64 extra, is at least four
-		-- gigabytes. A Roblox buffer tops out near a gigabyte, so an archive that
-		-- large cannot be held in memory and the entry cannot be materialized.
-		-- Decant does not parse the zip64 extra to recover the size, since there is
-		-- nothing it could hand back, so this stays unsupported rather than pending.
+		-- A zip64 overflow entry's real size is at least four gigabytes, past
+		-- what a Roblox buffer can hold, so parsing the zip64 extra would have
+		-- nothing to hand back and this stays unsupported rather than pending.
 	end)
 
-	it.failing("Extracts a bzip2 compressed entry", function()
-		-- Method 12 is bzip2. Decant treats every nonzero method as deflate and
-		-- cannot read it.
-		local expected = archives.bzip2.files[1]
-		local got = Decant.zip.extractFile(buffer.fromstring(archives.bzip2.bytes), expected.path)
-		expect(got).toBeDefined()
-		expect(buffer.tostring(got)).toBe(expected.body)
+	it("Rejects a bzip2 compressed entry by naming its method", function()
+		-- Method 12 is bzip2, which Decant has no decoder for.
+		expect(function()
+			Decant.zip.extractFile(buffer.fromstring(archives.bzip2.bytes), archives.bzip2.files[1].path)
+		end).toThrow("unsupported compression method 12")
+
+		-- The rejection happens at extraction, so a metadata walk still reads the
+		-- entry and reports the method for the caller to inspect.
+		local count = 0
+		for meta in Decant.zip.iterateFileMetadata(buffer.fromstring(archives.bzip2.bytes)) do
+			count += 1
+			expect(meta.method).toBe(12)
+		end
+		expect(count).toBe(1)
 	end)
 
-	it.failing("Extracts an lzma compressed entry", function()
+	it("Rejects an lzma compressed entry by naming its method", function()
 		-- Method 14 is lzma, in the same boat as bzip2.
-		local expected = archives.lzma.files[1]
-		local got = Decant.zip.extractFile(buffer.fromstring(archives.lzma.bytes), expected.path)
-		expect(got).toBeDefined()
-		expect(buffer.tostring(got)).toBe(expected.body)
+		expect(function()
+			Decant.zip.extractFile(buffer.fromstring(archives.lzma.bytes), archives.lzma.files[1].path)
+		end).toThrow("unsupported compression method 14")
 	end)
 
 	it("Reads a self-extracting archive with a prepended stub", function()
-		-- The archive sits behind an executable stub, so its stored central
-		-- directory offset no longer points where the data lands in the file.
-		-- Decant measures the stub from where the central directory actually sits
-		-- and corrects every offset by it, so both entries come back.
+		-- The archive sits behind an executable stub that shifts every recorded
+		-- offset, and both entries still have to come back.
 		expectArchiveExtracts(archives.prefixed)
 	end)
 
 	it.skip("Decrypts a password protected entry", function()
-		-- Traditional and AES ZIP encryption set general purpose bit zero and
-		-- scramble the entry data. Decant has no decryption, and Python's stdlib
-		-- cannot write an encrypted archive, so there is nothing to run here yet.
+		-- Decant has no decryption, and Python's stdlib cannot write an
+		-- encrypted archive, so there is nothing to run here yet.
 	end)
 
 	it.skip("Reads a multi-disk spanned archive", function()

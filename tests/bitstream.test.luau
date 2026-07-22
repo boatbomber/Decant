@@ -60,16 +60,16 @@ describe("bitstream", function()
 	end)
 
 	it("Decodes a symbol through a Huffman table", function()
-		-- Each entry packs the decoded symbol in the high bits and the code length
-		-- in the low four. A leading zero bit is a one-bit code for symbol 10,
-		-- while 0b01 and 0b11 are two-bit codes for 20 and 30. The byte 0x1A lays
-		-- those three codes out one after another.
-		local hufftable = {
-			[0] = 10 * 16 + 1,
-			[1] = 20 * 16 + 2,
-			[2] = 10 * 16 + 1,
-			[3] = 30 * 16 + 2,
-		}
+		-- A Huffman table is a buffer of two-byte entries, each packing the decoded
+		-- symbol in the high bits and the code length in the low four. A leading
+		-- zero bit is a one-bit code for symbol 10, while 0b01 and 0b11 are two-bit
+		-- codes for 20 and 30. The byte 0x1A lays those three codes out one after
+		-- another.
+		local hufftable = buffer.create(8)
+		buffer.writeu16(hufftable, 0, 10 * 16 + 1)
+		buffer.writeu16(hufftable, 2, 20 * 16 + 2)
+		buffer.writeu16(hufftable, 4, 10 * 16 + 1)
+		buffer.writeu16(hufftable, 6, 30 * 16 + 2)
 		local bs = bitstream.new(string.char(0x1A))
 		expect(bs:getSymbol(hufftable, 2)).toBe(10)
 		expect(bs:getSymbol(hufftable, 2)).toBe(20)

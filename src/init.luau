@@ -1,4 +1,5 @@
 --!strict
+--!native
 
 --[[
 	Decant's public API. The real work lives in the format submodules below, and

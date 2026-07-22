@@ -5,11 +5,11 @@
 ]]
 
 --[[
-	A Huffman lookup table, indexed by the bits peeked from the stream. Each
-	entry packs the decoded value in the upper bits and the code length in the
-	low four bits.
+	A Huffman lookup table, a buffer of two-byte entries indexed by peeked bits.
+	Each entry packs the symbol above the code length in the low four bits, and
+	a zero entry is a gap in an incomplete code the decoder rejects.
 ]]
-export type HuffTable = { [number]: number }
+export type HuffTable = buffer
 
 --[[
 	A bitstream reader over a buffer of compressed data. All offsets are 0-based
@@ -36,7 +36,7 @@ export type Bitstream = {
 export type ExpandableBuffer = {
 	buf: buffer, -- Backing store, resized as it fills.
 	len: number, -- Number of bytes written so far.
-	writeByte: (ExpandableBuffer, byte: number) -> (),
+	reserve: (ExpandableBuffer, n: number) -> (),
 	copyFrom: (ExpandableBuffer, source: buffer, offset: number, count: number) -> (),
 	copyMatch: (ExpandableBuffer, distance: number, length: number) -> (),
 	finalize: (ExpandableBuffer) -> buffer,

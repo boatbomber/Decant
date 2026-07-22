@@ -1,4 +1,5 @@
 --!strict
+--!native
 
 --[[
 	Raw deflate stream decompression.
@@ -11,8 +12,7 @@ local deflate = {}
 
 --[[
 	Decompresses a raw deflate stream, one with no gzip or zlib wrapper around
-	it, and returns the contents as a buffer. There's no header to parse or
-	checksum to verify, so the bytes go straight to the deflate core.
+	it, and returns the contents as a buffer.
 ]]
 function deflate.decompress(data: buffer): buffer
 	return inflate.decode(bitstream.new(data))
